@@ -9,7 +9,7 @@ video_length=$(mpv --no-video --frames=0 --log-file=/dev/stdout $videoFile | gre
 
 time_to_seconds() {
   IFS=: read -r h m s <<<"$1"
-  printf "%d" "$((h * 3600 + m * 60 + s))"
+  printf "%d" "$((10#$h * 3600 + 10#$m * 60 + 10#$s))"
 }
 
 # read timestamps from file
