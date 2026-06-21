@@ -1,0 +1,437 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>BlurEdit</title>
+    <style>
+    :root{--gap:6px;}
+    html,body{height:100%;margin:0;background:#000000;color:#e6eef6;font-family:monospace;}
+    .layout{display:grid;grid-template-columns:62% 1fr;height:100vh;gap:var(--gap);padding:8px;box-sizing:border-box;}
+    .left{display:flex;flex-direction:column;gap:8px;}
+    .video-wrap{position:relative;flex:1 1 auto;background:#000;overflow:hidden;border:1px solid #222;}
+    video{width:100%;height:100%;display:block;background:#000;object-fit:contain;}
+    .overlay{position:absolute;left:0;top:0;right:0;bottom:0;pointer-events:auto;}
+    .controls{display:flex;gap:6px;align-items:center;flex-wrap:wrap;}
+    .controls input[type=file], .controls button, .controls select{
+    padding:6px 8px;border:1px solid #333;background:#0f1113;color:#e6eef6;cursor:pointer;
+    }
+    .time{min-width:260px;font-family:monospace;color:#cfe6ff;}
+    .scrub{height:72px;background:#0f1113;color:#ddd;display:block;padding:6px;box-sizing:border-box;position:relative;border:1px solid #222;}
+    canvas#scrub{width:100%;height:100%;cursor:pointer;display:block;background:#071018;}
+    .marker{position:absolute;top:0;bottom:0;width:2px;background:#ffd166;pointer-events:auto;cursor:ew-resize;}
+    .marker.start{background:#6ee7a7;}
+    .marker.end{background:#ff7b7b;}
+    .segment{position:absolute;top:0;bottom:0;background:rgba(255,200,0,0.18);border-left:1px solid rgba(255,200,0,0.6);border-right:1px solid rgba(255,200,0,0.6);pointer-events:none;}
+    .right{display:flex;flex-direction:column;gap:8px;}
+    .meta{display:flex;gap:6px;align-items:center;flex-wrap:wrap;}
+    .meta button{padding:6px 8px;border:1px solid #333;background:#0f1113;color:#e6eef6;cursor:pointer;}
+    textarea#editor{flex:1 1 auto;width:100%;resize:none;padding:8px;border:1px solid #222;background:#0b0d10;color:#e6eef6;font-family:monospace;box-sizing:border-box;white-space:pre;}
+    @media (max-width:900px){ .layout{grid-template-columns:1fr;grid-auto-rows:auto;} }
+    </style>
+  </head>
+  <body>
+    <div class="layout">
+      <div class="left">
+        <div class="video-wrap" id="videoWrap">
+        <video id="video" playsinline preload="metadata"></video>
+        <div class="overlay" id="videoOverlay"></div>
+      </div>
+      <div class="controls">
+        <input id="fileInput" type="file" accept="video/*">
+        <button id="playPause" disabled>Play</button>
+        <button id="backFrame">< Frame</button>
+        <button id="forwardFrame">Frame ></button>
+        <label style="display:flex;align-items:center;gap:6px;">
+          Speed
+          <select id="speed">
+            <option value="0.25">0.25x</option>
+            <option value="0.5">0.5x</option>
+            <option value="0.75">0.75x</option>
+            <option value="1" selected>1x</option>
+            <option value="1.5">1.5x</option>
+            <option value="2">2x</option>
+          </select>
+        </label>
+        <button id="setStart">SetStartTime</button>
+        <button id="setEnd">SetEndTime</button>
+        <div style="flex:1"></div>
+        <div class="time" id="timeDisplay">00:00:00.00 / 00:00:00.00</div>
+      </div>
+      <div class="scrub" id="scrubContainer">
+        <canvas id="scrub" width="1200" height="72"></canvas>
+      </div>
+    </div>
+    <div class="right">
+      <div class="meta">
+        <button id="addBlur">Add Blur</button>
+        <button id="addBlurFull">Add Blur (Fullscreen)</button>
+        <button id="clearEditor">Clear</button>
+        <div style="flex:1"></div>
+      </div>
+      <textarea id="editor">Open Video
+      </textarea>
+    </div>
+  </div>
+  <script>
+  const fileInput = document.getElementById('fileInput');
+  const video = document.getElementById('video');
+  const playPause = document.getElementById('playPause');
+  const backFrame = document.getElementById('backFrame');
+  const forwardFrame = document.getElementById('forwardFrame');
+  const speed = document.getElementById('speed');
+  const setStartBtn = document.getElementById('setStart');
+  const setEndBtn = document.getElementById('setEnd');
+  const addBlur = document.getElementById('addBlur');
+  const addBlurFull = document.getElementById('addBlurFull');
+  const clearEditor = document.getElementById('clearEditor');
+  const editor = document.getElementById('editor');
+  const timeDisplay = document.getElementById('timeDisplay');
+  const scrubCanvas = document.getElementById('scrub');
+  const scrubContainer = document.getElementById('scrubContainer');
+  const videoOverlay = document.getElementById('videoOverlay');
+  let duration = 0;
+  let frameStep = 1/30;
+  let filename = '';
+  let startTime = null;
+  let endTime = null;
+  let startMarker = null;
+  let endMarker = null;
+  let segmentEl = null;
+  let area = { x:null, y:null, w:null, h:null, el:null };
+  let isAreaDragging = false;
+  let areaStart = { x:0, y:0 };
+  function getRealVideoRect() {
+  const r = video.getBoundingClientRect();
+  const vw = video.videoWidth || r.width;
+  const vh = video.videoHeight || r.height;
+  if (!vw || !vh) return { x: r.left, y: r.top, width: r.width, height: r.height };
+  const videoAspect = vw / vh;
+  const boxAspect = r.width / r.height;
+  let realW, realH, realX, realY;
+  if (videoAspect > boxAspect) {
+  realW = r.width;
+  realH = r.width / videoAspect;
+  realX = r.left;
+  realY = r.top + (r.height - realH) / 2;
+  } else {
+  realH = r.height;
+  realW = r.height * videoAspect;
+  realY = r.top;
+  realX = r.left + (r.width - realW) / 2;
+  }
+  return { x: realX, y: realY, width: realW, height: realH };
+  }
+  function pad(n, len=2){ return String(n).padStart(len,'0'); }
+  function fmtTime(t){
+  if (!isFinite(t) || t === null) return '00:00:00.00';
+  const h = Math.floor(t/3600);
+  const m = Math.floor((t%3600)/60);
+  const s = Math.floor(t%60);
+  const cs = Math.floor((t - Math.floor(t)) * 100);
+  return `${pad(h)}:${pad(m)}:${pad(s)}.${pad(cs,2)}`;
+  }
+  fileInput.addEventListener('change', (e) => {
+  const f = e.target.files && e.target.files[0];
+  if (!f) return;
+  filename = f.name;
+  const url = URL.createObjectURL(f);
+  playPause.disabled = true;
+  video.src = url;
+  video.load();
+  video.addEventListener('canplay', () => { playPause.disabled = false; }, { once:true });
+  video.addEventListener('loadedmetadata', () => {
+  duration = video.duration || 0;
+  frameStep = 1/30;
+  const w = video.videoWidth || Math.round(video.getBoundingClientRect().width);
+  const h = video.videoHeight || Math.round(video.getBoundingClientRect().height);
+  editor.value = `Blurs for ${filename}
+  ${duration.toFixed(3)}s
+  ${w}x${h}
+  `;
+  updateTime();
+  drawScrub();
+  }, { once:true });
+  });
+  playPause.addEventListener('click', () => {
+  if (video.paused) video.play(); else video.pause();
+  });
+  video.addEventListener('play', () => { playPause.textContent = 'Pause'; startRAF(); });
+  video.addEventListener('pause', () => { playPause.textContent = 'Play'; stopRAF(); });
+  video.addEventListener('timeupdate', updateTime);
+  speed.addEventListener('change', () => video.playbackRate = parseFloat(speed.value));
+  backFrame.addEventListener('click', () => {
+  video.currentTime = Math.max(0, video.currentTime - frameStep);
+  updateTime();
+  });
+  forwardFrame.addEventListener('click', () => {
+  video.currentTime = Math.min(duration, video.currentTime + frameStep);
+  updateTime();
+  });
+  const ctx = scrubCanvas.getContext('2d');
+  function drawScrub(){
+  const w = scrubCanvas.clientWidth;
+  const h = scrubCanvas.clientHeight;
+  const dpr = window.devicePixelRatio || 1;
+  scrubCanvas.width = Math.round(w * dpr);
+  scrubCanvas.height = Math.round(h * dpr);
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.clearRect(0,0,w,h);
+  ctx.fillStyle = '#0b0d10';
+  ctx.fillRect(0,0,w,h);
+  const prog = (duration > 0) ? (video.currentTime / duration) : 0;
+  ctx.fillStyle = '#1f6feb';
+  ctx.fillRect(0, h*0.6, w*prog, h*0.25);
+  ctx.fillStyle = '#222';
+  ctx.font = '12px monospace';
+  ctx.textBaseline = 'top';
+  const marks = 6;
+  for (let i=0;i<=marks;i++){
+  const x = i/marks * w;
+  ctx.fillRect(x, h*0.95, 1, h*0.03);
+  ctx.fillText(fmtTime(i/marks * duration), x+2, 2);
+  }
+  positionMarkers();
+  }
+  function clientXToTime(clientX){
+  const rect = scrubCanvas.getBoundingClientRect();
+  const x = Math.max(0, Math.min(rect.width, clientX - rect.left));
+  return (x / rect.width) * Math.max(duration,1);
+  }
+  function timeToX(t){
+  const rect = scrubCanvas.getBoundingClientRect();
+  return (t / Math.max(duration,1)) * rect.width;
+  }
+  let scrubbing = false;
+  scrubCanvas.addEventListener('mousedown', (ev) => {
+  if (duration <= 0) return;
+  scrubbing = true;
+  video.currentTime = clientXToTime(ev.clientX);
+  updateTime();
+  });
+  window.addEventListener('mousemove', (ev) => {
+  if (!scrubbing) return;
+  video.currentTime = clientXToTime(ev.clientX);
+  updateTime();
+  });
+  window.addEventListener('mouseup', () => scrubbing = false);
+  function ensureStartMarker(){
+  if (!startMarker){
+  startMarker = document.createElement('div');
+  startMarker.className = 'marker start';
+  scrubContainer.appendChild(startMarker);
+  makeMarkerDraggable(startMarker, 'start');
+  }
+  }
+  function ensureEndMarker(){
+  if (!endMarker){
+  endMarker = document.createElement('div');
+  endMarker.className = 'marker end';
+  scrubContainer.appendChild(endMarker);
+  makeMarkerDraggable(endMarker, 'end');
+  }
+  }
+  function ensureSegment(){
+  if (!segmentEl){
+  segmentEl = document.createElement('div');
+  segmentEl.className = 'segment';
+  scrubContainer.appendChild(segmentEl);
+  }
+  }
+  function positionMarkers(){
+  const rect = scrubCanvas.getBoundingClientRect();
+  scrubContainer.style.position = 'relative';
+  if (startTime !== null){
+  ensureStartMarker();
+  startMarker.style.left = (timeToX(startTime) - 1) + 'px';
+  startMarker.style.display = '';
+  } else if (startMarker){
+  startMarker.style.display = 'none';
+  }
+  if (endTime !== null){
+  ensureEndMarker();
+  endMarker.style.left = (timeToX(endTime) - 1) + 'px';
+  endMarker.style.display = '';
+  } else if (endMarker){
+  endMarker.style.display = 'none';
+  }
+  if (startTime !== null && endTime !== null){
+  ensureSegment();
+  const x1 = timeToX(Math.min(startTime,endTime));
+  const x2 = timeToX(Math.max(startTime,endTime));
+  segmentEl.style.left = x1 + 'px';
+  segmentEl.style.width = Math.max(1, x2 - x1) + 'px';
+  segmentEl.style.display = '';
+  } else if (segmentEl){
+  segmentEl.style.display = 'none';
+  }
+  }
+  function makeMarkerDraggable(el, which){
+  let dragging = false;
+  function onDown(e){
+  e.preventDefault();
+  dragging = true;
+  window.addEventListener('mousemove', onMove);
+  window.addEventListener('mouseup', onUp);
+  }
+  function onMove(ev){
+  if (!dragging) return;
+  const t = clientXToTime(ev.clientX);
+  if (which === 'start'){
+  startTime = Math.max(0, Math.min(duration, t));
+  if (endTime !== null && startTime > endTime) startTime = endTime;
+  } else {
+  endTime = Math.max(0, Math.min(duration, t));
+  if (startTime !== null && endTime < startTime) endTime = startTime;
+  }
+  positionMarkers();
+  updateSelectionInfo();
+  }
+  function onUp(){
+  dragging = false;
+  window.removeEventListener('mousemove', onMove);
+  window.removeEventListener('mouseup', onUp);
+  }
+  el.addEventListener('mousedown', onDown);
+  }
+  setStartBtn.addEventListener('click', () => {
+  startTime = video.currentTime;
+  if (endTime !== null && startTime > endTime){ const tmp = startTime; startTime = endTime; endTime = tmp; }
+  positionMarkers();
+  updateSelectionInfo();
+  });
+  setEndBtn.addEventListener('click', () => {
+  endTime = video.currentTime;
+  if (startTime !== null && endTime < startTime){ const tmp = startTime; startTime = endTime; endTime = tmp; }
+  positionMarkers();
+  updateSelectionInfo();
+  });
+  function clearArea(){
+  if (area.el){ area.el.remove(); area.el = null; }
+  area.x = area.y = area.w = area.h = null;
+  }
+  function createAreaEl(){
+  clearArea();
+  const el = document.createElement('div');
+  el.style.position = 'absolute';
+  el.style.border = '2px dashed #444';
+  el.style.background = 'rgba(0,0,0,0.05)';
+  el.style.pointerEvents = 'none';
+  videoOverlay.appendChild(el);
+  area.el = el;
+  }
+  function updateAreaEl(){
+  if (!area.el) return;
+  const real = getRealVideoRect();
+  const videoRect = video.getBoundingClientRect();
+  const offsetLeft = real.x - videoRect.left;
+  const offsetTop = real.y - videoRect.top;
+  area.el.style.left = (offsetLeft + area.x) + 'px';
+  area.el.style.top = (offsetTop + area.y) + 'px';
+  area.el.style.width = area.w + 'px';
+  area.el.style.height = area.h + 'px';
+  }
+  function clampToRealVideoLocal(ev){
+  const real = getRealVideoRect();
+  const xAbs = Math.max(real.x, Math.min(real.x + real.width, ev.clientX));
+  const yAbs = Math.max(real.y, Math.min(real.y + real.height, ev.clientY));
+  return { x: xAbs - real.x, y: yAbs - real.y, real };
+  }
+  videoOverlay.addEventListener('mousedown', (ev) => {
+  if (ev.button !== 0) return;
+  ev.preventDefault();
+  const { x, y } = clampToRealVideoLocal(ev);
+  isAreaDragging = true;
+  areaStart = { x, y };
+  area.x = x; area.y = y; area.w = 0; area.h = 0;
+  createAreaEl();
+  updateAreaEl();
+  });
+  window.addEventListener('mousemove', (ev) => {
+  if (!isAreaDragging) return;
+  const { x, y } = clampToRealVideoLocal(ev);
+  const x1 = Math.min(areaStart.x, x);
+  const y1 = Math.min(areaStart.y, y);
+  const x2 = Math.max(areaStart.x, x);
+  const y2 = Math.max(areaStart.y, y);
+  area.x = x1; area.y = y1; area.w = Math.max(1, x2 - x1); area.h = Math.max(1, y2 - y1);
+  updateAreaEl();
+  updateSelectionInfo();
+  });
+  window.addEventListener('mouseup', () => {
+  if (!isAreaDragging) return;
+  isAreaDragging = false;
+  if (area.w < 6 || area.h < 6) clearArea();
+  updateSelectionInfo();
+  });
+  function computeAreaValues(){
+  const real = getRealVideoRect();
+  const intrinsicW = video.videoWidth || Math.round(real.width);
+  const intrinsicH = video.videoHeight || Math.round(real.height);
+  if (area.x === null || area.w === null){
+  return { sizeX: intrinsicW, sizeY: intrinsicH, offsetX: 0, offsetY: 0 };
+  }
+  const scaleX = intrinsicW / real.width;
+  const scaleY = intrinsicH / real.height;
+  const sizeX = Math.round(area.w * scaleX);
+  const sizeY = Math.round(area.h * scaleY);
+  const offsetX = Math.round(area.x * scaleX);
+  const offsetY = Math.round(area.y * scaleY);
+  return { sizeX, sizeY, offsetX, offsetY };
+  }
+  function appendLine(line){
+  if (editor.value.length > 0 && !editor.value.endsWith('\n')) editor.value += '\n';
+  editor.value += line + '\n';
+  editor.scrollTop = editor.scrollHeight;
+  }
+  addBlur.addEventListener('click', () => {
+  let s,e;
+  if (startTime !== null && endTime !== null){ s = Math.min(startTime,endTime); e = Math.max(startTime,endTime); }
+  else { s = video.currentTime || 0; e = s + 0.5; }
+  const vals = computeAreaValues();
+  appendLine(`${fmtTime(s)} ${fmtTime(e)} ${vals.sizeX} ${vals.sizeY} ${vals.offsetX} ${vals.offsetY}`);
+  });
+  addBlurFull.addEventListener('click', () => {
+  let s,e;
+  if (startTime !== null && endTime !== null){ s = Math.min(startTime,endTime); e = Math.max(startTime,endTime); }
+  else { s = video.currentTime || 0; e = s + 0.5; }
+  appendLine(`${fmtTime(s)} ${fmtTime(e)}`);
+  });
+  clearEditor.addEventListener('click', () => {
+  editor.value = ``;
+  });
+  function updateSelectionInfo(){
+  let timeText = 'No selection';
+  if (startTime !== null && endTime !== null){
+  timeText = `${fmtTime(Math.min(startTime,endTime))} → ${fmtTime(Math.max(startTime,endTime))}`;
+  } else if (startTime !== null){
+  timeText = `Start: ${fmtTime(startTime)} · End: not set`;
+  } else if (endTime !== null){
+  timeText = `Start: not set · End: ${fmtTime(endTime)}`;
+  }
+  let areaText = 'No area';
+  if (area.x !== null && area.w !== null){
+  const v = computeAreaValues();
+  areaText = `${v.sizeX}x${v.sizeY}@${v.offsetX},${v.offsetY}`;
+  }
+  timeDisplay.textContent = `${fmtTime(video.currentTime)} / ${fmtTime(duration)}  ·  ${timeText}  ·  ${areaText}`;
+  }
+  function updateTime(){
+  duration = video.duration || duration || 0;
+  updateSelectionInfo();
+  drawScrub();
+  }
+  function startRAF(){
+  if (raf) cancelAnimationFrame(raf);
+  const loop = () => { drawScrub(); raf = requestAnimationFrame(loop); };
+  raf = requestAnimationFrame(loop);
+  }
+  function stopRAF(){ if (raf) cancelAnimationFrame(raf); raf = null; }
+  video.addEventListener('timeupdate', updateSelectionInfo);
+  video.addEventListener('seeked', () => { updateSelectionInfo(); drawScrub(); });
+  window.addEventListener('resize', () => { drawScrub(); positionMarkers(); updateSelectionInfo(); });
+  drawScrub();
+  updateSelectionInfo();
+  </script>
+</body>
+</html>
